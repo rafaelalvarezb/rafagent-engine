@@ -157,13 +157,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       if (!userId) {
-        return res.json({ authenticated: false });
-      }
+      return res.json({ authenticated: false });
+    }
 
       const user = await storage.getUser(userId);
       if (!user) {
         if (req.session) {
-          req.session.destroy(() => {});
+        req.session.destroy(() => {});
         }
         return res.json({ authenticated: false });
       }
