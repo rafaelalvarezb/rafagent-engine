@@ -42,7 +42,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/auth/google/callback", async (req, res) => {
+  app.get("/auth/google/callback", async (req, res) => {
     try {
       const code = req.query.code as string;
       
@@ -106,9 +106,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Redirect to frontend (Vercel)
-      const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
-      res.redirect(frontendUrl);
+      // Redirect to frontend
+      res.redirect('/');
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
