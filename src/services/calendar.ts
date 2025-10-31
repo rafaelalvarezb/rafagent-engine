@@ -213,19 +213,10 @@ export async function getAvailableSlots(
   
   while (currentDate < endDate) {
     // IMPORTANTE: Obtener día de la semana EN EL TIMEZONE DEL USUARIO, no en UTC
-    const dateInUserTimezone = currentDate.toLocaleString('en-US', { 
-      timeZone: timezone, 
-      weekday: 'long',
-      year: 'numeric',
-      month: 'numeric',
-      day: 'numeric'
-    });
-    
-    // Crear Date en el timezone del usuario para obtener el día correcto
-    const dayOfWeek = parseInt(currentDate.toLocaleString('en-US', { 
-      timeZone: timezone,
-      weekday: 'numeric' 
-    })) % 7; // 0=Sunday, 1=Monday...
+    // Crear una fecha en el timezone del usuario para obtener el día correcto
+    const dateStr = currentDate.toLocaleDateString('en-CA', { timeZone: timezone }); // YYYY-MM-DD
+    const dateInTz = new Date(dateStr + 'T12:00:00'); // Usar mediodía para evitar cambios de día
+    const dayOfWeek = dateInTz.getDay(); // 0=Sunday, 1=Monday...
     
     // Solo días laborables
     if (workingDayNumbers.includes(dayOfWeek)) {
