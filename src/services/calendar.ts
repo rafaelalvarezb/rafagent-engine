@@ -212,7 +212,20 @@ export async function getAvailableSlots(
   let currentDate = new Date(startDate);
   
   while (currentDate < endDate) {
-    const dayOfWeek = currentDate.getDay();
+    // IMPORTANTE: Obtener día de la semana EN EL TIMEZONE DEL USUARIO, no en UTC
+    const dateInUserTimezone = currentDate.toLocaleString('en-US', { 
+      timeZone: timezone, 
+      weekday: 'long',
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric'
+    });
+    
+    // Crear Date en el timezone del usuario para obtener el día correcto
+    const dayOfWeek = parseInt(currentDate.toLocaleString('en-US', { 
+      timeZone: timezone,
+      weekday: 'numeric' 
+    })) % 7; // 0=Sunday, 1=Monday...
     
     // Solo días laborables
     if (workingDayNumbers.includes(dayOfWeek)) {
@@ -227,7 +240,7 @@ export async function getAvailableSlots(
         month: 'long', 
         day: 'numeric',
         timeZone: timezone 
-      })}`);
+      })} (day ${dayOfWeek})`);
       
       // Generar slots de 30 minutos
       for (let hour = workStartHour; hour < workEndHour; hour++) {
