@@ -7,7 +7,7 @@ import { classifyResponse, replaceTemplateVariables } from "./services/ai";
 import { getAvailableSlots, findNextAvailableSlot, scheduleMeeting } from "./services/calendar";
 import { getAuthUrl, getTokensFromCode, getUserInfo } from "./auth";
 import { requireAuth, getCurrentUserId } from "./middleware/auth";
-import { generateToken } from "./middleware/jwt";
+import { generateToken, verifyToken } from "./middleware/jwt";
 import { runAgent } from "./automation/agent";
 import { createDefaultTemplates, createDefaultUserConfig } from "./automation/defaultTemplates";
 import { isWithinWorkingHours, getWorkingHoursFromConfig, debugWorkingHours } from "./utils/workingHours";
@@ -138,14 +138,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/auth/status", async (req, res) => {
-    if (!req.session.userId) {
-      return res.json({ authenticated: false });
-    }
-
     try {
-      const user = await storage.getUser(req.session.userId);
+      let userId: string | undefined;
+      
+      // Check for JWT token first (for frontend)
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7);
+        const payload = verifyToken(token);
+        if (payload) {
+          userId = payload.userId;
+        }
+      }
+      
+      // Fallback to session (for backward compatibility)
+      if (!userId && req.session.userId) {
+        userId = req.session.userId;
+      }
+      
+      if (!userId) {
+        return res.json({ authenticated: false });
+      }
+
+      const user = await storage.getUser(userId);
       if (!user) {
-        req.session.destroy(() => {});
+        if (req.session) {
+          req.session.destroy(() => {});
+        }
         return res.json({ authenticated: false });
       }
 
@@ -162,6 +181,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       });
     } catch (error) {
+      console.error('Auth status error:', error);
       res.json({ authenticated: false });
     }
   });
