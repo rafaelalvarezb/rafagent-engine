@@ -286,7 +286,7 @@ export async function getAvailableSlots(
 
 /**
  * Convierte una hora de un timezone a otro
- * Crea una fecha de referencia con la hora especificada y la convierte correctamente
+ * Método correcto: usa el offset UTC de ambos timezones para calcular la diferencia
  * @param timeString - Hora en formato HH:MM (ej: "12:00")
  * @param fromTimezone - Timezone de origen (ej: "America/Argentina/Buenos_Aires")
  * @param toTimezone - Timezone de destino (ej: "America/Mexico_City")
@@ -301,60 +301,47 @@ function convertTimeBetweenTimezones(
     // Parsear la hora (formato HH:MM)
     const [hours, minutes = 0] = timeString.split(':').map(Number);
     
-    // Crear una fecha de referencia (usaremos mañana para evitar problemas de DST)
-    const referenceDate = new Date();
-    referenceDate.setDate(referenceDate.getDate() + 1);
+    // Obtener fecha actual para calcular offsets
+    const now = new Date();
     
-    const year = referenceDate.getFullYear();
-    const month = referenceDate.getMonth() + 1;
-    const day = referenceDate.getDate();
+    // Obtener el offset UTC de ambos timezones para una fecha específica
+    // Usamos una fecha "hoy" para calcular el offset correcto (considera DST)
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    const day = now.getDate();
     
-    // Crear una fecha que represente la hora especificada en el timezone de origen
-    // Usamos una fecha ISO en el timezone de origen
-    // El truco: crear una fecha como si fuera local, pero en realidad está en fromTimezone
-    const dateString = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
+    // Crear una fecha que representa "hoy a mediodía" en UTC
+    const testDate = new Date(Date.UTC(year, month, day, 12, 0, 0));
     
-    // Crear formatters para ambos timezones
-    const formatterFrom = new Intl.DateTimeFormat('en-US', {
+    // Obtener qué hora es esta fecha UTC en cada timezone
+    const fromTzFormatter = new Intl.DateTimeFormat('en-US', {
       timeZone: fromTimezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
       hour12: false
     });
     
-    const formatterTo = new Intl.DateTimeFormat('en-US', {
+    const toTzFormatter = new Intl.DateTimeFormat('en-US', {
       timeZone: toTimezone,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
       hour12: false
     });
     
-    // Calcular el offset entre los dos timezones usando una fecha de prueba
-    // Usamos el mediodía UTC como referencia
-    const testDateUTC = new Date(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T12:00:00Z`);
+    // Obtener la hora en cada timezone cuando es mediodía UTC
+    const fromParts = fromTzFormatter.formatToParts(testDate);
+    const toParts = toTzFormatter.formatToParts(testDate);
     
-    // Obtener la hora que representa ese UTC en cada timezone
-    const fromParts = formatterFrom.formatToParts(testDateUTC);
-    const toParts = formatterTo.formatToParts(testDateUTC);
+    const fromHour = parseInt(fromParts.find(p => p.type === 'hour')?.value || '12');
+    const toHour = parseInt(toParts.find(p => p.type === 'hour')?.value || '12');
     
-    const hourInFromTz = parseInt(fromParts.find(p => p.type === 'hour')?.value || '0');
-    const hourInToTz = parseInt(toParts.find(p => p.type === 'hour')?.value || '0');
+    // Calcular la diferencia: si mediodía UTC es 9 AM en Argentina y 6 AM en México
+    // Argentina está 3 horas AHEAD de México
+    // Entonces para convertir: horaMéxico = horaArgentina - 3
+    const offsetHours = fromHour - toHour;
     
-    // Calcular la diferencia: si Argentina muestra 9 AM para el mediodía UTC
-    // y México muestra 6 AM, entonces Argentina está 3 horas adelante de México
-    // offsetDiff = hora_en_fromTz - hora_en_toTz (cuando ambos ven el mismo UTC)
-    const offsetDiff = hourInFromTz - hourInToTz;
-    
-    // Aplicar la conversión
-    // Si el prospecto dice "12 PM Argentina" y Argentina está 3 horas adelante de México:
-    // convertedHour = 12 - 3 = 9 AM México ✅
-    let convertedHour = hours - offsetDiff;
+    // Aplicar la conversión: si son 12 PM en Argentina (GMT-3), son 9 AM en México (GMT-6)
+    let convertedHour = hours - offsetHours;
     
     // Normalizar a rango 0-23
     while (convertedHour < 0) {
@@ -364,14 +351,15 @@ function convertTimeBetweenTimezones(
       convertedHour -= 24;
     }
     
-    console.log(`🔄 Timezone conversion:`);
-    console.log(`   Input: ${hours}:${String(minutes).padStart(2, '0')} ${fromTimezone}`);
-    console.log(`   Output: ${convertedHour}:${String(minutes).padStart(2, '0')} ${toTimezone}`);
-    console.log(`   Offset difference: ${offsetDiff} hours (${fromTimezone} is ${offsetDiff > 0 ? offsetDiff : Math.abs(offsetDiff)} hours ${offsetDiff > 0 ? 'ahead' : 'behind'} ${toTimezone})`);
+    const result = `${String(Math.floor(convertedHour)).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
     
-    return `${String(convertedHour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    console.log(`🕐 Timezone conversion:`);
+    console.log(`   ${timeString} ${fromTimezone} → ${result} ${toTimezone}`);
+    console.log(`   Offset calculated: ${offsetHours} hours (when UTC noon = ${fromHour} in ${fromTimezone}, ${toHour} in ${toTimezone})`);
+    
+    return result;
   } catch (error) {
-    console.error('Error converting timezone:', error);
+    console.error('❌ Error converting timezone:', error);
     return timeString; // Retornar original si falla
   }
 }
