@@ -26,6 +26,23 @@ function getTemplateNameForTouchpoint(touchpointNumber: number): string {
 
 export async function registerRoutes(app: Express): Promise<Server> {
   
+  // ===== ROOT ROUTE =====
+  // Redirect root requests to frontend
+  app.get("/", (_req, res) => {
+    const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
+    res.redirect(frontendUrl);
+  });
+
+  // Health check endpoint
+  app.get("/health", (_req, res) => {
+    res.json({
+      status: "ok",
+      service: "rafagent-engine",
+      timestamp: new Date().toISOString(),
+      websocket: "enabled"
+    });
+  });
+  
   // ===== AUTHENTICATION =====
   app.get("/api/auth/google", (req, res) => {
     const authUrl = getAuthUrl();
