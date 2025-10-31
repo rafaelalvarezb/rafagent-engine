@@ -70,7 +70,7 @@ export async function scheduleMeeting(params: ScheduleMeetingParams): Promise<an
     
     console.log(`📅 Start (Local): ${startLocal}`);
     console.log(`📅 End (Local): ${endLocal}`);
-    
+
     const event = {
       summary: params.title,
       description: params.description,
@@ -146,7 +146,7 @@ function createDateInTimezone(
   const offset = utcDate.getTime() - tzDate.getTime();
   
   return new Date(localDate.getTime() + offset);
-}
+  }
 
 /**
  * Obtiene slots disponibles en el calendario
@@ -185,7 +185,21 @@ export async function getAvailableSlots(
   console.log(`📊 Found ${busySlots.length} busy events`);
 
   const availableSlots: Date[] = [];
-  const workingDayNumbers = [1, 2, 3, 4, 5]; // Lunes-Viernes
+  
+  // Convertir workingDays de strings a números (0=Sunday, 1=Monday, ..., 6=Saturday)
+  const dayNameToNumber: Record<string, number> = {
+    'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3,
+    'thursday': 4, 'friday': 5, 'saturday': 6,
+    'domingo': 0, 'lunes': 1, 'martes': 2, 'miércoles': 3, 'miercoles': 3,
+    'jueves': 4, 'viernes': 5, 'sábado': 6, 'sabado': 6
+  };
+  
+  const workingDayNumbers = workingDays && workingDays.length > 0
+    ? workingDays.map(day => dayNameToNumber[day.toLowerCase()]).filter(n => n !== undefined)
+    : [1, 2, 3, 4, 5]; // Default: Lunes-Viernes si no se especifica
+  
+  console.log(`📅 Working days configured: ${workingDays?.join(', ') || 'default (Mon-Fri)'}`);
+  console.log(`📅 Working day numbers: ${workingDayNumbers.join(', ')}`);
   
   // Mínimo 24 horas desde ahora
   const minTime = new Date();
@@ -221,23 +235,23 @@ export async function getAvailableSlots(
           // Crear fecha en el timezone del usuario
           const slotStart = createDateInTimezone(year, month, day, hour, minute, timezone);
           const slotEnd = new Date(slotStart.getTime() + 30 * 60000);
-          
+        
           // Verificar que sea futuro (24h mínimo)
           if (slotStart < minTime) {
             continue;
           }
           
           // Verificar conflictos
-          const isConflict = busySlots.some(busy => {
+        const isConflict = busySlots.some(busy => {
             return slotStart < busy.end && slotEnd > busy.start;
-          });
-          
+        });
+        
           if (!isConflict) {
             availableSlots.push(slotStart);
             console.log(`   ✅ ${hour}:${String(minute).padStart(2, '0')} available`);
           } else {
             console.log(`   ❌ ${hour}:${String(minute).padStart(2, '0')} busy`);
-          }
+        }
         }
       }
     } else {
@@ -339,7 +353,7 @@ export function findNextAvailableSlot(
         minute: '2-digit'
       })}`);
       return dayMatch;
-    } else {
+      } else {
       console.log(`⚠️ No slots on preferred day, using first available`);
       return sortedSlots[0];
     }
