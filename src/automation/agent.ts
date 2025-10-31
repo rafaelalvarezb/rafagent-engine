@@ -11,7 +11,7 @@
 
 import { google } from 'googleapis';
 import { storage } from '../storage';
-import { sendEmail, getThreadMessages, getMessageBody } from '../services/gmail';
+import { sendEmail, getThreadMessages, getMessageBody, cleanEmailForAI } from '../services/gmail';
 import { classifyResponse, replaceTemplateVariables } from '../services/ai';
 import { getAvailableSlots, findNextAvailableSlot, scheduleMeeting } from '../services/calendar';
 import { isWithinWorkingHours, getWorkingHoursFromConfig, debugWorkingHours } from '../utils/workingHours';
@@ -479,9 +479,13 @@ async function analyzeProspectResponse(user: any, prospect: any): Promise<boolea
   }
 
   const body = await getMessageBody(lastMessage);
-  console.log(`Response body: ${body.substring(0, 200)}...`);
+  console.log(`Response body (raw): ${body.substring(0, 200)}...`);
   
-  const classification = await classifyResponse(body);
+  // Clean the email body to extract ONLY the prospect's actual response
+  const cleanedBody = cleanEmailForAI(body);
+  console.log(`Response body (cleaned): ${cleanedBody}`);
+  
+  const classification = await classifyResponse(cleanedBody);
   console.log(`AI Classification: ${classification.category}`);
 
   let newStatus = '';
@@ -552,106 +556,81 @@ async function analyzeProspectResponse(user: any, prospect: any): Promise<boolea
  */
 async function scheduleProspectMeeting(user: any, prospect: any, config: any, sequence: any) {
   try {
+    console.log(`\n🚀 === STARTING MEETING SCHEDULING PROCESS ===`);
+    console.log(`👤 User: ${user.name} (${user.email})`);
+    console.log(`👥 Prospect: ${prospect.contactName} (${prospect.contactEmail})`);
+    
+    // Usar configuración del usuario (o default a Ciudad de México)
     const workStartHour = parseInt(config.searchStartTime?.split(':')[0] || '9');
     const workEndHour = parseInt(config.searchEndTime?.split(':')[0] || '17');
+    const timezone = config.timezone || 'America/Mexico_City';
+    const workingDays = config.workingDays?.split(',') || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
 
-    // Start search 24 hours from now
-    let searchStartDate = new Date();
+    console.log(`⚙️ Configuration:`);
+    console.log(`   🌍 Timezone: ${timezone}`);
+    console.log(`   🕐 Working hours: ${workStartHour}:00 - ${workEndHour}:00`);
+    console.log(`   📅 Working days: ${workingDays.join(', ')}`);
+
+    // Buscar desde mañana (24 horas desde ahora)
+    const searchStartDate = new Date();
     searchStartDate.setHours(searchStartDate.getHours() + 24);
     
-    // Round to next 30-minute slot
-    const minutes = searchStartDate.getMinutes();
-    if (minutes > 30) {
-      searchStartDate.setHours(searchStartDate.getHours() + 1);
-      searchStartDate.setMinutes(0, 0, 0);
-    } else if (minutes > 0) {
-      searchStartDate.setMinutes(30, 0, 0);
-    }
-
     const searchEndDate = new Date(searchStartDate);
-    searchEndDate.setDate(searchEndDate.getDate() + 30);
+    searchEndDate.setDate(searchEndDate.getDate() + 30);  // Buscar próximos 30 días
 
-    // Parse working days from config
-    const workingDays = typeof config.workingDays === 'string' 
-      ? config.workingDays.split(',').map(d => d.trim())
-      : config.workingDays || ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
-    
+    console.log(`📅 Search window: ${searchStartDate.toISOString()} to ${searchEndDate.toISOString()}`);
+
+    // Obtener slots disponibles
     const availableSlots = await getAvailableSlots(
       user.googleAccessToken,
       searchStartDate,
       searchEndDate,
       workStartHour,
       workEndHour,
-      config.timezone || 'America/Mexico_City',
+      timezone,
       user.googleRefreshToken,
       workingDays
     );
 
-    // Parse preferred days from the prospect's response
+    console.log(`📊 Total available slots found: ${availableSlots.length}`);
+
+    if (availableSlots.length === 0) {
+      throw new Error('No available slots found in the next 30 days');
+    }
+
+    // Parsear preferencias del prospecto
     const preferredDays = prospect.suggestedDays ? 
       prospect.suggestedDays.split(',').map((d: string) => d.trim().toLowerCase()) : 
       undefined;
     
-    // Handle timezone conversion if the prospect specified a different timezone
-    let convertedTime = prospect.suggestedTime;
-    let dayAdjustment = 0;
+    const preferredTime = prospect.suggestedTime || undefined;
     
-    if (prospect.suggestedTime && prospect.suggestedTimezone) {
-      const userTimezone = config.timezone || 'America/Mexico_City';
-      convertedTime = convertTimezone(
-        prospect.suggestedTime,
-        prospect.suggestedTimezone,
-        userTimezone
-      );
-      dayAdjustment = getTimezoneDayAdjustment(
-        prospect.suggestedTime,
-        prospect.suggestedTimezone,
-        userTimezone
-      );
-      
-      console.log(`🌍 Timezone conversion:`, {
-        original: `${prospect.suggestedTime} ${prospect.suggestedTimezone}`,
-        converted: `${convertedTime} ${userTimezone}`,
-        dayAdjustment: dayAdjustment
-      });
-    }
-    
-    console.log(`📅 Scheduling meeting with preferences:`, {
-      raw_suggestedDays: prospect.suggestedDays,
-      raw_suggestedTime: prospect.suggestedTime,
-      raw_suggestedTimezone: prospect.suggestedTimezone,
-      raw_suggestedWeek: prospect.suggestedWeek,
-      parsed_preferredDays: preferredDays,
-      parsed_preferredTime: convertedTime || prospect.suggestedTime,
-      parsed_preferredWeek: prospect.suggestedWeek,
-      dayAdjustment: dayAdjustment,
-      availableSlotsCount: availableSlots.length,
-      first5Slots: availableSlots.slice(0, 5).map(s => s.toISOString())
+    console.log(`🎯 Prospect preferences:`, {
+      days: preferredDays || 'none',
+      time: preferredTime || 'none'
     });
     
+    // Encontrar mejor slot
     const selectedSlot = findNextAvailableSlot(
       availableSlots,
       preferredDays,
-      convertedTime || prospect.suggestedTime,
-      prospect.suggestedWeek
+      preferredTime,
+      undefined,
+      timezone
     );
     
-    console.log(`✅ Selected slot: ${selectedSlot ? selectedSlot.toISOString() : 'None'}`);
-
     if (!selectedSlot) {
-      throw new Error('No available slots found');
+      throw new Error('Could not find a suitable slot');
     }
 
-    const endTime = new Date(selectedSlot.getTime() + 30 * 60000);
+    console.log(`✅ Selected slot (UTC): ${selectedSlot.toISOString()}`);
+    console.log(`✅ Selected slot (${timezone}): ${selectedSlot.toLocaleString('es-MX', { timeZone: timezone })}`);
 
-    // Use sequence meeting templates if available, otherwise fall back to config
+    const endTime = new Date(selectedSlot.getTime() + 30 * 60000);  // 30 minutos después
+
+    // Obtener título y descripción de la reunión
     const meetingTitle = sequence?.meetingTitle || config.meetingTitle || '${companyName} & ${yourName}';
     const meetingDescription = sequence?.meetingDescription || config.meetingDescription || '';
-    
-    console.log(`📅 Using meeting template for prospect ${prospect.contactEmail}:`);
-    console.log(`   Sequence: ${sequence?.name || 'None'}`);
-    console.log(`   Title: ${meetingTitle}`);
-    console.log(`   Description: ${meetingDescription}`);
 
     const title = replaceTemplateVariables(meetingTitle, {
       externalCid: prospect.externalCid || '',
@@ -671,13 +650,7 @@ async function scheduleProspectMeeting(user: any, prospect: any, config: any, se
       yourName: user.name
     });
 
-    // Get OAuth client with automatic token refresh
-    const oauthClient = await getOAuth2ClientWithRefresh(
-      user.googleAccessToken,
-      user.googleRefreshToken,
-      user.id
-    );
-
+    // Programar la reunión
     const meetingResult = await scheduleMeeting({
       accessToken: user.googleAccessToken,
       refreshToken: user.googleRefreshToken,
@@ -685,20 +658,22 @@ async function scheduleProspectMeeting(user: any, prospect: any, config: any, se
       title: title,
       description: description,
       startTime: selectedSlot,
-      endTime: endTime
+      endTime: endTime,
+      userTimezone: timezone
     });
 
-    console.log(`📧 Meeting scheduled successfully! Google Calendar will send the automatic invitation.`);
-    console.log(`🔗 Meeting link: ${meetingResult.meetLink}`);
+    console.log(`🎉 Meeting scheduled successfully!`);
+    console.log(`🔗 Meet link: ${meetingResult.meetLink}`);
+    console.log(`🔗 Calendar link: ${meetingResult.htmlLink}`);
 
-    // Update prospect status and save meeting time
+    // Actualizar estado del prospecto
     await storage.updateProspect(prospect.id, {
       status: '✅ Meeting Scheduled 🗓️',
       sendSequence: false,
-      meetingTime: selectedSlot // Save the actual meeting time
+      meetingTime: selectedSlot
     });
     
-    // Emit WebSocket updates
+    // Emitir actualizaciones por WebSocket
     emitProspectStatusChange(user.id, prospect.id, '✅ Meeting Scheduled 🗓️');
     emitMeetingScheduled(user.id, prospect.id, {
       meetingTime: selectedSlot,
@@ -706,16 +681,20 @@ async function scheduleProspectMeeting(user: any, prospect: any, config: any, se
       contactEmail: prospect.contactEmail
     });
 
-    // Log activity
+    // Registrar actividad
     await storage.createActivityLog({
       userId: user.id,
       prospectId: prospect.id,
       action: 'Meeting Scheduled (Auto)',
-      detail: `Meeting created at ${selectedSlot.toISOString()}. Google Calendar sent automatic invitation to ${prospect.contactEmail}.`
+      detail: `Meeting created at ${selectedSlot.toLocaleString('es-MX', { timeZone: timezone })}. Google Calendar sent invitation to ${prospect.contactEmail}.`
     });
 
+    console.log(`✅ === MEETING SCHEDULING COMPLETED ===\n`);
+
   } catch (error: any) {
-    console.error('Error scheduling meeting:', error);
+    console.error('❌ === MEETING SCHEDULING FAILED ===');
+    console.error('Error:', error.message);
+    console.error('Stack:', error.stack);
     await storage.updateProspect(prospect.id, {
       status: `❌ Scheduling Error: ${error.message}`
     });
