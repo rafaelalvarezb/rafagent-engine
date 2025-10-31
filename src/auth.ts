@@ -5,7 +5,7 @@ import type { OAuth2Client } from 'google-auth-library';
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/google/callback'
+  process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/api/auth/google/callback'
 );
 
 // Scopes needed for Gmail and Calendar
@@ -133,3 +133,4 @@ export async function getOAuth2ClientWithRefresh(accessToken: string, refreshTok
 
   return client;
 }
+
