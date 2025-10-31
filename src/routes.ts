@@ -7,6 +7,7 @@ import { classifyResponse, replaceTemplateVariables } from "./services/ai";
 import { getAvailableSlots, findNextAvailableSlot, scheduleMeeting } from "./services/calendar";
 import { getAuthUrl, getTokensFromCode, getUserInfo } from "./auth";
 import { requireAuth, getCurrentUserId } from "./middleware/auth";
+import { generateToken } from "./middleware/jwt";
 import { runAgent } from "./automation/agent";
 import { createDefaultTemplates, createDefaultUserConfig } from "./automation/defaultTemplates";
 import { isWithinWorkingHours, getWorkingHoursFromConfig, debugWorkingHours } from "./utils/workingHours";
@@ -123,8 +124,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Redirect to frontend
-      res.redirect('/');
+      // Generate JWT token for frontend
+      const token = generateToken(user.id, user.email);
+        
+      // Redirect to frontend with token as query parameter
+      const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
+      console.log(`✅ Authentication successful for ${user.email}, redirecting to ${frontendUrl}/dashboard?token=${token}`);
+      res.redirect(`${frontendUrl}/dashboard?token=${token}`);
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
