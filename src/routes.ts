@@ -106,8 +106,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Redirect to frontend
-      res.redirect('/');
+      // Redirect to frontend (Vercel)
+      const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
+      res.redirect(frontendUrl);
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
