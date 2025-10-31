@@ -604,19 +604,22 @@ async function scheduleProspectMeeting(user: any, prospect: any, config: any, se
       undefined;
     
     const preferredTime = prospect.suggestedTime || undefined;
+    const preferredTimezone = prospect.suggestedTimezone || undefined; // Timezone mencionado por prospecto
     
     console.log(`🎯 Prospect preferences:`, {
       days: preferredDays || 'none',
-      time: preferredTime || 'none'
+      time: preferredTime || 'none',
+      timezone: preferredTimezone || 'none (will use user timezone)'
     });
     
-    // Encontrar mejor slot
+    // Encontrar mejor slot (con conversión automática si el prospecto mencionó otro timezone)
     const selectedSlot = findNextAvailableSlot(
       availableSlots,
       preferredDays,
       preferredTime,
       undefined,
-      timezone
+      timezone,
+      preferredTimezone // Pasar timezone mencionado por prospecto
     );
     
     if (!selectedSlot) {

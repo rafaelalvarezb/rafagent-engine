@@ -85,9 +85,31 @@ export async function createDefaultTemplates(userId: string): Promise<void> {
 
 /**
  * Create default user configuration
+ * @param userId - User ID
+ * @param detectedTimezone - Optional detected timezone from browser (e.g., 'America/New_York')
  */
-export async function createDefaultUserConfig(userId: string): Promise<void> {
+export async function createDefaultUserConfig(userId: string, detectedTimezone?: string): Promise<void> {
   console.log(`Creating default config for user ${userId}`);
+  
+  // Try to use detected timezone, otherwise fallback to Mexico City
+  let timezone = 'America/Mexico_City';
+  
+  if (detectedTimezone) {
+    // Validate that the detected timezone is in our database
+    try {
+      const { isValidTimezone } = await import('../utils/timezoneDetection');
+      if (isValidTimezone(detectedTimezone)) {
+        timezone = detectedTimezone;
+        console.log(`✅ Using detected timezone: ${timezone}`);
+      } else {
+        console.log(`⚠️ Invalid detected timezone: ${detectedTimezone}, using default`);
+      }
+    } catch (error) {
+      console.log(`⚠️ Error validating timezone, using default:`, error);
+    }
+  } else {
+    console.log(`⚠️ No timezone detected, using default: ${timezone}`);
+  }
   
   try {
     await storage.createUserConfig({
@@ -100,10 +122,10 @@ export async function createDefaultUserConfig(userId: string): Promise<void> {
       searchEndTime: '17:00',
       agentFrequencyHours: 0.5, // 30 minutes default
       workingDays: 'monday,tuesday,wednesday,thursday,friday',
-      timezone: 'America/Mexico_City'
+      timezone: timezone
     });
     
-    console.log(`Created default config for user ${userId}`);
+    console.log(`Created default config for user ${userId} with timezone: ${timezone}`);
   } catch (error) {
     console.error(`Error creating default config:`, error);
   }

@@ -185,7 +185,7 @@ export async function getAvailableSlots(
   console.log(`📊 Found ${busySlots.length} busy events`);
 
   const availableSlots: Date[] = [];
-  
+
   // Convertir workingDays de strings a números (0=Sunday, 1=Monday, ..., 6=Saturday)
   const dayNameToNumber: Record<string, number> = {
     'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3,
@@ -200,7 +200,7 @@ export async function getAvailableSlots(
   
   console.log(`📅 Working days configured: ${workingDays?.join(', ') || 'default (Mon-Fri)'}`);
   console.log(`📅 Working day numbers: ${workingDayNumbers.join(', ')}`);
-  
+
   // Mínimo 24 horas desde ahora
   const minTime = new Date();
   minTime.setHours(minTime.getHours() + 24);
@@ -285,6 +285,166 @@ export async function getAvailableSlots(
 }
 
 /**
+ * Convierte una hora de un timezone a otro
+ * Crea una fecha de referencia con la hora especificada y la convierte correctamente
+ * @param timeString - Hora en formato HH:MM (ej: "12:00")
+ * @param fromTimezone - Timezone de origen (ej: "America/Argentina/Buenos_Aires")
+ * @param toTimezone - Timezone de destino (ej: "America/Mexico_City")
+ * @returns Hora convertida en formato HH:MM
+ */
+function convertTimeBetweenTimezones(
+  timeString: string,
+  fromTimezone: string,
+  toTimezone: string
+): string {
+  try {
+    // Parsear la hora (formato HH:MM)
+    const [hours, minutes = 0] = timeString.split(':').map(Number);
+    
+    // Crear una fecha de referencia (usaremos mañana para evitar problemas de DST)
+    const referenceDate = new Date();
+    referenceDate.setDate(referenceDate.getDate() + 1);
+    
+    const year = referenceDate.getFullYear();
+    const month = referenceDate.getMonth() + 1;
+    const day = referenceDate.getDate();
+    
+    // Crear una fecha que represente la hora especificada en el timezone de origen
+    // Usamos una fecha ISO en el timezone de origen
+    // El truco: crear una fecha como si fuera local, pero en realidad está en fromTimezone
+    const dateString = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:00`;
+    
+    // Crear formatters para ambos timezones
+    const formatterFrom = new Intl.DateTimeFormat('en-US', {
+      timeZone: fromTimezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    
+    const formatterTo = new Intl.DateTimeFormat('en-US', {
+      timeZone: toTimezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    
+    // Calcular el offset entre los dos timezones usando una fecha de prueba
+    // Usamos el mediodía UTC como referencia
+    const testDateUTC = new Date(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T12:00:00Z`);
+    
+    // Obtener la hora que representa ese UTC en cada timezone
+    const fromParts = formatterFrom.formatToParts(testDateUTC);
+    const toParts = formatterTo.formatToParts(testDateUTC);
+    
+    const hourInFromTz = parseInt(fromParts.find(p => p.type === 'hour')?.value || '0');
+    const hourInToTz = parseInt(toParts.find(p => p.type === 'hour')?.value || '0');
+    
+    // Calcular la diferencia: si Argentina muestra 9 AM para el mediodía UTC
+    // y México muestra 6 AM, entonces Argentina está 3 horas adelante de México
+    // offsetDiff = hora_en_fromTz - hora_en_toTz (cuando ambos ven el mismo UTC)
+    const offsetDiff = hourInFromTz - hourInToTz;
+    
+    // Aplicar la conversión
+    // Si el prospecto dice "12 PM Argentina" y Argentina está 3 horas adelante de México:
+    // convertedHour = 12 - 3 = 9 AM México ✅
+    let convertedHour = hours - offsetDiff;
+    
+    // Normalizar a rango 0-23
+    while (convertedHour < 0) {
+      convertedHour += 24;
+    }
+    while (convertedHour >= 24) {
+      convertedHour -= 24;
+    }
+    
+    console.log(`🔄 Timezone conversion:`);
+    console.log(`   Input: ${hours}:${String(minutes).padStart(2, '0')} ${fromTimezone}`);
+    console.log(`   Output: ${convertedHour}:${String(minutes).padStart(2, '0')} ${toTimezone}`);
+    console.log(`   Offset difference: ${offsetDiff} hours (${fromTimezone} is ${offsetDiff > 0 ? offsetDiff : Math.abs(offsetDiff)} hours ${offsetDiff > 0 ? 'ahead' : 'behind'} ${toTimezone})`);
+    
+    return `${String(convertedHour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  } catch (error) {
+    console.error('Error converting timezone:', error);
+    return timeString; // Retornar original si falla
+  }
+}
+
+/**
+ * Mapea nombres comunes de timezones a IANA identifiers
+ */
+function mapTimezoneNameToIANA(timezoneName: string): string | null {
+  const nameLower = timezoneName.toLowerCase().trim();
+  
+  const timezoneMap: Record<string, string> = {
+    // Argentina
+    'argentina': 'America/Argentina/Buenos_Aires',
+    'hora argentina': 'America/Argentina/Buenos_Aires',
+    'buenos aires': 'America/Argentina/Buenos_Aires',
+    'art': 'America/Argentina/Buenos_Aires',
+    
+    // Mexico
+    'mexico': 'America/Mexico_City',
+    'méxico': 'America/Mexico_City',
+    'hora mexicana': 'America/Mexico_City',
+    'ciudad de méxico': 'America/Mexico_City',
+    'cdmx': 'America/Mexico_City',
+    
+    // US timezones
+    'est': 'America/New_York',
+    'edt': 'America/New_York',
+    'eastern': 'America/New_York',
+    'cst': 'America/Chicago',
+    'cdt': 'America/Chicago',
+    'central': 'America/Chicago',
+    'pst': 'America/Los_Angeles',
+    'pdt': 'America/Los_Angeles',
+    'pacific': 'America/Los_Angeles',
+    
+    // Europe
+    'gmt': 'Europe/London',
+    'cet': 'Europe/Paris',
+    'cest': 'Europe/Paris',
+    
+    // Brazil
+    'brasil': 'America/Sao_Paulo',
+    'brazil': 'America/Sao_Paulo',
+    'sao paulo': 'America/Sao_Paulo',
+    
+    // Colombia
+    'colombia': 'America/Bogota',
+    
+    // Peru
+    'peru': 'America/Lima',
+    'perú': 'America/Lima',
+    
+    // Chile
+    'chile': 'America/Santiago',
+  };
+  
+  // Buscar coincidencia exacta o parcial
+  for (const [key, iana] of Object.entries(timezoneMap)) {
+    if (nameLower === key || nameLower.includes(key) || key.includes(nameLower)) {
+      return iana;
+    }
+  }
+  
+  // Si no se encuentra, intentar usar directamente (puede ser un IANA válido)
+  try {
+    Intl.DateTimeFormat(undefined, { timeZone: timezoneName });
+    return timezoneName;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Encuentra el siguiente slot disponible según preferencias
  */
 export function findNextAvailableSlot(
@@ -292,7 +452,8 @@ export function findNextAvailableSlot(
   preferredDays?: string[],
   preferredTime?: string,
   preferredWeek?: string,
-  userTimezone?: string
+  userTimezone?: string,
+  preferredTimezone?: string // Timezone mencionado por el prospecto
 ): Date | null {
   const timezone = userTimezone || 'America/Mexico_City';
   
@@ -300,6 +461,20 @@ export function findNextAvailableSlot(
   console.log(`📊 Total slots: ${availableSlots.length}`);
   console.log(`📅 Preferred days: ${preferredDays?.join(', ') || 'none'}`);
   console.log(`🕐 Preferred time: ${preferredTime || 'none'}`);
+  
+  // Si el prospecto mencionó un timezone diferente, convertir la hora
+  let convertedTime = preferredTime;
+  if (preferredTimezone && preferredTime) {
+    const mappedTimezone = mapTimezoneNameToIANA(preferredTimezone);
+    if (mappedTimezone && mappedTimezone !== timezone) {
+      console.log(`🌍 Converting time from ${preferredTimezone} (${mappedTimezone}) to ${timezone}`);
+      const originalTime = preferredTime;
+      convertedTime = convertTimeBetweenTimezones(preferredTime, mappedTimezone, timezone);
+      console.log(`   ${originalTime} ${preferredTimezone} → ${convertedTime} ${timezone}`);
+    } else {
+      console.log(`⚠️ Could not map timezone "${preferredTimezone}", using time as-is`);
+    }
+  }
   
   if (availableSlots.length === 0) {
     console.log(`❌ No slots available`);
@@ -364,9 +539,10 @@ export function findNextAvailableSlot(
   }
 
   // CASO 3: Hora preferida (y tal vez día también)
-  if (preferredTime) {
-    const [hours, minutes] = preferredTime.split(':').map(Number);
-    console.log(`🕐 Looking for time: ${hours}:${String(minutes || 0).padStart(2, '0')}`);
+  if (convertedTime || preferredTime) {
+    const timeToUse = convertedTime || preferredTime;
+    const [hours, minutes] = timeToUse!.split(':').map(Number);
+    console.log(`🕐 Looking for time: ${hours}:${String(minutes || 0).padStart(2, '0')} (${timezone})`);
     
     let candidateSlots = sortedSlots;
     

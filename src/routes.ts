@@ -7,11 +7,13 @@ import { classifyResponse, replaceTemplateVariables } from "./services/ai";
 import { getAvailableSlots, findNextAvailableSlot, scheduleMeeting } from "./services/calendar";
 import { getAuthUrl, getTokensFromCode, getUserInfo } from "./auth";
 import { requireAuth, getCurrentUserId } from "./middleware/auth";
-import { generateToken, authenticateJWT, optionalAuth } from "./middleware/jwt";
 import { runAgent } from "./automation/agent";
 import { createDefaultTemplates, createDefaultUserConfig } from "./automation/defaultTemplates";
 import { isWithinWorkingHours, getWorkingHoursFromConfig, debugWorkingHours } from "./utils/workingHours";
+import { SERVER_CONFIG } from "./config";
+import { redirectToEngine } from "./utils/engineRedirect";
 import { ensureCurrentUserDefaults } from "./utils/ensureDefaults";
+import { detectUserTimezone } from "./utils/timezoneDetection";
 
 /**
  * Get template name for touchpoint number
@@ -40,7 +42,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/api/auth/google/callback", async (req, res) => {
+  app.get("/auth/google/callback", async (req, res) => {
     try {
       const code = req.query.code as string;
       
@@ -67,10 +69,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let isNewUser = false;
       
       if (!user) {
+        // Use default timezone for new users (they can change it in settings)
+        const defaultTimezone = 'America/Mexico_City';
+        console.log(`🌍 Using default timezone for new user: ${defaultTimezone}`);
+        
         user = await storage.createUser({
           email: userInfo.email,
           name: userInfo.name || userInfo.email,
-          timezone: 'America/Mexico_City'
+          timezone: defaultTimezone
         });
         isNewUser = true;
       }
@@ -82,9 +88,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         googleTokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined
       });
 
+      // Create session
+      req.session.userId = user.id;
+      req.session.userEmail = user.email;
+
       // If new user, create default templates and config
       if (isNewUser) {
         try {
+          // Try to detect timezone from request headers (browser sends it)
+          // Note: We'll detect it on frontend and send via separate API call after login
+          // For now, use a default and let frontend update it
           await createDefaultTemplates(user.id);
           await createDefaultUserConfig(user.id);
           console.log(`Setup completed for new user: ${user.email}`);
@@ -93,54 +106,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Generate JWT token
-      const token = generateToken(user.id, user.email);
-        
-      // Redirect to frontend with token as query parameter
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-      console.log(`✅ Authentication successful for ${user.email}, redirecting to ${frontendUrl}/dashboard`);
-      res.redirect(`${frontendUrl}/dashboard?token=${token}`);
+      // Redirect to frontend
+      res.redirect('/');
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
     }
   });
 
-  app.get("/api/auth/status", optionalAuth, async (req, res) => {
-    const user = (req as any).user;
-    
-    if (!user) {
+  app.get("/api/auth/status", async (req, res) => {
+    if (!req.session.userId) {
       return res.json({ authenticated: false });
     }
 
     try {
-      const userData = await storage.getUser(user.id);
-      if (!userData) {
+      const user = await storage.getUser(req.session.userId);
+      if (!user) {
+        req.session.destroy(() => {});
         return res.json({ authenticated: false });
       }
 
-      // Always ensure user has default sequences and config
-      try {
-        await ensureCurrentUserDefaults(userData.id);
-        
-        // Also create default sequences if none exist
-        const sequences = await storage.getSequencesByUser(userData.id);
-        if (sequences.length === 0) {
-          console.log(`No sequences found for user ${userData.email}, creating defaults...`);
-          await createDefaultTemplates(userData.id);
-          await createDefaultUserConfig(userData.id);
-        }
-      } catch (error) {
-        console.error('Error ensuring defaults for user:', error);
-      }
+      // Ensure user has default sequences and config
+      await ensureCurrentUserDefaults(user.id);
 
       res.json({
         authenticated: true,
         user: {
-          id: userData.id,
-          email: userData.email,
-          name: userData.name,
-          timezone: userData.timezone
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          timezone: user.timezone
         }
       });
     } catch (error) {
@@ -149,9 +144,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    // With JWT, logout is handled on the client side by removing the token
-    // No server-side session to destroy
+    req.session.destroy((err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Failed to logout' });
+      }
       res.json({ success: true });
+    });
   });
 
   // ===== PROSPECTS =====
@@ -363,26 +361,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ===== TEMPLATES =====
-  app.get("/api/templates", optionalAuth, async (req, res) => {
+  app.get("/api/templates", requireAuth, async (req, res) => {
     try {
-      const user = (req as any).user;
-      if (!user) {
-        return res.json([]);
-      }
-      
-      const userId = user.id;
+      const userId = getCurrentUserId(req)!;
       const templates = await storage.getTemplatesByUser(userId);
-      
-      // Add cache-busting headers
-      res.set({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      
       res.json(templates);
     } catch (error: any) {
-      console.error('Error fetching templates:', error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -519,6 +503,69 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== TIMEZONE MANAGEMENT =====
+  app.get("/api/timezones", async (req, res) => {
+    try {
+      const { getTimezonesByRegion, detectUserTimezone } = await import("./utils/timezoneDetection");
+      const regions = getTimezonesByRegion();
+      const detected = detectUserTimezone();
+      
+      res.json({
+        regions,
+        detected,
+        current: req.query.current as string || detected
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/timezones/detect", async (req, res) => {
+    try {
+      const { detectUserTimezone } = await import("./utils/timezoneDetection");
+      const detected = detectUserTimezone();
+      
+      res.json({ timezone: detected });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Endpoint to set user's timezone (called from frontend after login)
+  app.post("/api/user/timezone", requireAuth, async (req, res) => {
+    try {
+      const userId = getCurrentUserId(req)!;
+      const { timezone } = req.body;
+      
+      if (!timezone) {
+        return res.status(400).json({ error: "Timezone is required" });
+      }
+      
+      // Validate timezone
+      const { isValidTimezone } = await import("./utils/timezoneDetection");
+      if (!isValidTimezone(timezone)) {
+        return res.status(400).json({ error: "Invalid timezone" });
+      }
+      
+      // Update user config with detected timezone
+      const config = await storage.getUserConfig(userId);
+      if (config) {
+      await storage.updateUserConfig(userId, { timezone });
+        console.log(`✅ Updated timezone for user ${userId} to ${timezone}`);
+      } else {
+        // Create config with detected timezone
+        await storage.createUserConfig({ userId, timezone });
+        console.log(`✅ Created config for user ${userId} with timezone ${timezone}`);
+      }
+      
+      res.json({ success: true, timezone });
+    } catch (error: any) {
+      console.error('Error setting user timezone:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+
   // ===== ACTIVITY LOGS =====
   app.get("/api/activities", requireAuth, async (req, res) => {
     try {
@@ -641,13 +688,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/prospects/:id/send-followup", async (req, res) => {
+  app.post("/api/prospects/:id/send-followup", requireAuth, async (req, res) => {
     try {
-      const userId = "temp-user-id";
+      const userId = getCurrentUserId(req)!;
       const prospect = await storage.getProspect(req.params.id);
       
       if (!prospect) {
         return res.status(404).json({ error: "Prospect not found" });
+      }
+
+      if (prospect.userId !== userId) {
+        return res.status(403).json({ error: "Access denied" });
       }
 
       if (!prospect.threadId) {
@@ -666,6 +717,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const user = await storage.getUser(userId);
+      if (!user?.googleAccessToken) {
+        return res.status(400).json({ error: "Google account not connected" });
+      }
+
       const body = replaceTemplateVariables(template.body, {
         externalCid: prospect.externalCid || '',
         contactName: prospect.contactName,
@@ -685,7 +740,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       const htmlBody = body.replace(/\n/g, '<br>');
-      await sendEmail(prospect.contactEmail, subject, htmlBody, prospect.threadId);
+      await sendEmail(
+        user.googleAccessToken,
+        prospect.contactEmail,
+        subject,
+        htmlBody,
+        prospect.threadId,
+        user.googleRefreshToken,
+        userId
+      );
 
       await storage.updateProspect(prospect.id, {
         status: 'Following up',
@@ -712,18 +775,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/prospects/:id/analyze-response", async (req, res) => {
+  app.post("/api/prospects/:id/analyze-response", requireAuth, async (req, res) => {
     try {
-      const userId = "temp-user-id";
+      const userId = getCurrentUserId(req)!;
       const prospect = await storage.getProspect(req.params.id);
       
-      if (!prospect || !prospect.threadId) {
-        return res.status(404).json({ error: "Prospect or thread not found" });
+      if (!prospect) {
+        return res.status(404).json({ error: "Prospect not found" });
+      }
+
+      if (prospect.userId !== userId) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      if (!prospect.threadId) {
+        return res.status(400).json({ error: "No thread ID found" });
       }
 
       await storage.updateProspect(prospect.id, { status: '🧐 Analyzing response...' });
 
-      const messages = await getThreadMessages(prospect.threadId);
+      const user = await storage.getUser(userId);
+      if (!user?.googleAccessToken) {
+        return res.status(400).json({ error: "Google account not connected" });
+      }
+
+      const messages = await getThreadMessages(user.googleAccessToken, prospect.threadId, user.googleRefreshToken, userId);
       if (messages.length === 0) {
         throw new Error("No messages found in thread");
       }
@@ -799,13 +875,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/prospects/:id/schedule-meeting", async (req, res) => {
+  app.post("/api/prospects/:id/schedule-meeting", requireAuth, async (req, res) => {
     try {
-      const userId = "temp-user-id";
+      const userId = getCurrentUserId(req)!;
       const prospect = await storage.getProspect(req.params.id);
       
       if (!prospect) {
         return res.status(404).json({ error: "Prospect not found" });
+      }
+
+      if (prospect.userId !== userId) {
+        return res.status(403).json({ error: "Access denied" });
       }
 
       await storage.updateProspect(prospect.id, { status: '🤖 Creating event...' });
@@ -818,7 +898,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       const workStartHour = parseInt(config.searchStartTime?.split(':')[0] || '9');
-      const workEndHour = parseInt(config.searchEndTime?.split(':')[0] || '17');
+      const workEndHour = parseInt(config.searchEndTime?.split(':')[0] || '23');
+      
+      console.log(`🔧 User config - Start: ${config.searchStartTime}, End: ${config.searchEndTime}`);
+      console.log(`🕐 Parsed hours - Start: ${workStartHour}, End: ${workEndHour}`);
 
       let searchStartDate = new Date();
       searchStartDate.setHours(searchStartDate.getHours() + 24);
@@ -833,26 +916,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const searchEndDate = new Date(searchStartDate);
       searchEndDate.setDate(searchEndDate.getDate() + 30);
+      
+      console.log(`📅 Search period: ${searchStartDate.toISOString()} to ${searchEndDate.toISOString()}`);
+      console.log(`📅 Search period (user timezone): ${searchStartDate.toLocaleString("en-US", { timeZone: user?.timezone || 'America/Mexico_City' })} to ${searchEndDate.toLocaleString("en-US", { timeZone: user?.timezone || 'America/Mexico_City' })}`);
+
+      // Use user's configured timezone from config (user can change this in settings)
+      const userTimezone = config.timezone || user?.timezone || 'America/Mexico_City';
+      console.log(`🌍 Using configured user timezone: ${userTimezone}`);
+      console.log(`⏰ Working hours: ${workStartHour}:00 - ${workEndHour}:00 (${userTimezone})`);
 
       const availableSlots = await getAvailableSlots(
+        user?.googleAccessToken || '',
         searchStartDate,
         searchEndDate,
         workStartHour,
         workEndHour,
-        user?.timezone || 'America/Mexico_City'
+        userTimezone,
+        user?.googleRefreshToken,
+        config.workingDays?.split(',')
       );
 
       const preferredDays = prospect.suggestedDays?.split(',').map(d => d.trim());
+      console.log(`🎯 Prospect preferences - Days: ${preferredDays}, Time: ${prospect.suggestedTime}, Week: ${prospect.suggestedWeek}`);
+      console.log(`📊 Available slots count: ${availableSlots.length}`);
+      
       const selectedSlot = findNextAvailableSlot(
         availableSlots,
         preferredDays,
         prospect.suggestedTime || undefined,
-        prospect.suggestedWeek || undefined
+        prospect.suggestedWeek || undefined,
+        userTimezone
       );
 
       if (!selectedSlot) {
         throw new Error("No available slots found in the configured time range");
       }
+      
+      console.log(`✅ Selected slot: ${selectedSlot.toISOString()}`);
+      console.log(`✅ Selected slot (user timezone): ${selectedSlot.toLocaleString("en-US", { timeZone: user?.timezone || 'America/Mexico_City' })}`);
 
       const endTime = new Date(selectedSlot.getTime() + 30 * 60000);
 
@@ -888,7 +989,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         title: title || `${prospect.companyName || 'Meeting'} & Google`,
         description: description || '',
         startTime: selectedSlot,
-        endTime: endTime
+        endTime: endTime,
+        accessToken: user?.googleAccessToken || '',
+        refreshToken: user?.googleRefreshToken,
+        userTimezone: userTimezone
       });
 
       await storage.updateProspect(prospect.id, {
@@ -940,6 +1044,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/agent/run", requireAuth, async (req, res) => {
     try {
       const userId = getCurrentUserId(req)!;
+      
+      // In hybrid mode, redirect to persistent engine
+      if (SERVER_CONFIG.IS_HYBRID_MODE) {
+        const response = await redirectToEngine(`/api/agent/run/${userId}`, {
+          method: 'POST'
+        });
+        const result = await response.json();
+        return res.json(result);
+      }
+      
+      // Fallback to local agent (development mode)
       const result = await runAgent(userId);
       res.json(result);
     } catch (error: any) {
@@ -950,15 +1065,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ===== ENGINE STATUS ENDPOINTS =====
   app.get("/api/engine/status", async (req, res) => {
     try {
-      const users = await storage.getAllUsers();
-      const activeUsers = users.filter(u => u.googleAccessToken);
+      if (SERVER_CONFIG.IS_HYBRID_MODE) {
+        const response = await redirectToEngine('/api/status');
+        const result = await response.json();
+        return res.json(result);
+      }
       
+      // Fallback for development mode
       res.json({
-        status: "running",
-        activeUsers: activeUsers.length,
-        totalUsers: users.length,
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
+        status: 'development',
+        message: 'Running in development mode - engine not available'
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
@@ -966,50 +1082,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/engine/health", async (req, res) => {
-    res.json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      service: 'rafagent-engine'
-    });
+    try {
+      if (SERVER_CONFIG.IS_HYBRID_MODE) {
+        const response = await redirectToEngine('/health');
+        const result = await response.json();
+        return res.json(result);
+      }
+      
+      // Fallback for development mode
+      res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        service: 'rafagent-frontend-dev'
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // ===== SEQUENCES =====
-  app.get("/api/sequences", optionalAuth, async (req, res) => {
+  app.get("/api/sequences", requireAuth, async (req, res) => {
     try {
-      const user = (req as any).user;
-      if (!user) {
-        return res.json([]);
-      }
-      
-      const userId = user.id;
-      let sequences = await storage.getSequencesByUser(userId);
-      
-      // Always ensure user has at least one sequence
-      if (sequences.length === 0) {
-        console.log(`No sequences found for user ${user.email}, creating defaults...`);
-        try {
-          await createDefaultTemplates(userId);
-          await createDefaultUserConfig(userId);
-          
-          // Fetch sequences again after creating defaults
-          sequences = await storage.getSequencesByUser(userId);
-          console.log(`Created ${sequences.length} sequences for user ${user.email}`);
-        } catch (error) {
-          console.error('Error creating default sequences:', error);
-          return res.json([]);
-        }
-      }
-      
-      // Add cache-busting headers
-      res.set({
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      
+      const userId = getCurrentUserId(req)!;
+      const sequences = await storage.getSequencesByUser(userId);
       res.json(sequences);
     } catch (error: any) {
-      console.error('Error fetching sequences:', error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -1122,14 +1219,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/pixel/:prospectId", async (req, res) => {
     try {
       const { prospectId } = req.params;
+      console.log(`🔍 Pixel tracking hit for prospect: ${prospectId}`);
+      
       const prospect = await storage.getProspect(prospectId);
       
-      if (prospect && !prospect.emailOpened) {
+      if (prospect) {
+        console.log(`📧 Found prospect: ${prospect.contactEmail}, emailOpened: ${prospect.emailOpened}`);
+        
+        if (!prospect.emailOpened) {
         await storage.updateProspect(prospectId, {
           emailOpened: true,
           emailOpenedAt: new Date()
         });
-        console.log(`Email opened by prospect: ${prospect.contactEmail}`);
+          console.log(`✅ Email opened by prospect: ${prospect.contactEmail} at ${new Date().toISOString()}`);
+        } else {
+          console.log(`ℹ️ Email already marked as opened for: ${prospect.contactEmail}`);
+        }
+      } else {
+        console.log(`❌ Prospect not found: ${prospectId}`);
       }
       
       // Return 1x1 transparent pixel
@@ -1145,7 +1252,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       res.end(pixel);
     } catch (error: any) {
-      console.error('Pixel tracking error:', error);
+      console.error('❌ Pixel tracking error:', error);
       // Still return pixel even on error
       const pixel = Buffer.from(
         'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7',
@@ -1153,26 +1260,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       );
       res.writeHead(200, { 'Content-Type': 'image/gif' });
       res.end(pixel);
-    }
-  });
-
-  // ===== DIAGNOSTIC ENDPOINTS =====
-  app.post("/api/diagnostic/create-defaults", requireAuth, async (req, res) => {
-    try {
-      const userId = getCurrentUserId(req)!;
-      console.log(`Creating default sequences and templates for user ${userId}`);
-      
-      // Create default templates and config
-      await createDefaultTemplates(userId);
-      await createDefaultUserConfig(userId);
-      
-      res.json({ 
-        success: true, 
-        message: 'Default sequences and templates created successfully' 
-      });
-    } catch (error: any) {
-      console.error('Error creating defaults:', error);
-      res.status(500).json({ error: error.message });
     }
   });
 
