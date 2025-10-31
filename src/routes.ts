@@ -42,7 +42,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get("/auth/google/callback", async (req, res) => {
+  app.get("/api/auth/google/callback", async (req, res) => {
     try {
       const code = req.query.code as string;
       
