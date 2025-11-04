@@ -434,6 +434,7 @@ function mapTimezoneNameToIANA(timezoneName: string): string | null {
 
 /**
  * Encuentra el siguiente slot disponible según preferencias
+ * PRIORIZA el día y hora especificados por el prospecto siempre que respeten el gap de 24h
  */
 export function findNextAvailableSlot(
   availableSlots: Date[],
@@ -479,7 +480,39 @@ export function findNextAvailableSlot(
     'jueves': 4, 'viernes': 5, 'sábado': 6, 'sabado': 6
   };
 
-  // CASO 1: Sin preferencias - primer slot
+  // Helper: obtener hora y minuto de un slot en el timezone del usuario
+  const getSlotTime = (slot: Date): { hour: number; minute: number } => {
+    const hour = parseInt(slot.toLocaleString('en-US', { 
+      timeZone: timezone,
+      hour: '2-digit',
+      hour12: false
+    }));
+    const minute = parseInt(slot.toLocaleString('en-US', { 
+      timeZone: timezone,
+      minute: '2-digit'
+    }));
+    return { hour, minute };
+  };
+
+  // Helper: obtener día de la semana de un slot en el timezone del usuario
+  const getSlotDay = (slot: Date): number => {
+    // Obtener el día de la semana en el timezone del usuario
+    // Usar toLocaleString para obtener el día correcto según el timezone
+    const dayName = slot.toLocaleString('en-US', { 
+      timeZone: timezone,
+      weekday: 'long'
+    }).toLowerCase();
+    
+    // Mapear nombre del día a número (0=Sunday, 1=Monday, ..., 6=Saturday)
+    const dayMap: Record<string, number> = {
+      'sunday': 0, 'monday': 1, 'tuesday': 2, 'wednesday': 3,
+      'thursday': 4, 'friday': 5, 'saturday': 6
+    };
+    
+    return dayMap[dayName] ?? slot.getDay(); // Fallback a UTC si falla
+  };
+
+  // CASO 1: Sin preferencias - primer slot (ya respeta gap de 24h)
   if (!preferredDays && !preferredTime) {
     const firstSlot = sortedSlots[0];
     console.log(`✅ No preferences - using first slot:`);
@@ -496,6 +529,7 @@ export function findNextAvailableSlot(
   }
 
   // CASO 2: Solo día preferido (sin hora específica)
+  // PRIORIDAD: Buscar PRIMERO en el día especificado
   if (preferredDays && preferredDays.length > 0 && !preferredTime) {
     const preferredDayNumbers = preferredDays
       .map(d => dayMap[d.toLowerCase()])
@@ -503,12 +537,15 @@ export function findNextAvailableSlot(
     
     console.log(`🗓️ Looking for: ${preferredDays.join(', ')} (${preferredDayNumbers.join(', ')})`);
     
-    const dayMatch = sortedSlots.find(slot => {
-      const slotDay = slot.getDay();
+    // Filtrar slots del día preferido
+    const preferredDaySlots = sortedSlots.filter(slot => {
+      const slotDay = getSlotDay(slot);
       return preferredDayNumbers.includes(slotDay);
     });
     
-    if (dayMatch) {
+    if (preferredDaySlots.length > 0) {
+      // Usar el primer slot disponible en el día preferido
+      const dayMatch = preferredDaySlots[0];
       console.log(`✅ Found slot on preferred day:`);
       console.log(`   ${dayMatch.toLocaleString('es-MX', { 
         timeZone: timezone,
@@ -520,51 +557,170 @@ export function findNextAvailableSlot(
         minute: '2-digit'
       })}`);
       return dayMatch;
-      } else {
-      console.log(`⚠️ No slots on preferred day, using first available`);
+    } else {
+      // Si no hay slots en el día preferido, buscar al día siguiente
+      console.log(`⚠️ No slots on preferred day, looking for next day`);
+      
+      // Si no hay slots en el día preferido, buscar el siguiente día disponible
+      // (el primer slot disponible que respete el gap de 24h)
+      console.log(`⚠️ No slots found on preferred day, using first available`);
       return sortedSlots[0];
     }
   }
 
-  // CASO 3: Hora preferida (y tal vez día también)
-  if (convertedTime || preferredTime) {
+  // CASO 3: Día Y hora preferidos
+  if (preferredDays && preferredDays.length > 0 && (convertedTime || preferredTime)) {
     const timeToUse = convertedTime || preferredTime;
-    const [hours, minutes] = timeToUse!.split(':').map(Number);
-    console.log(`🕐 Looking for time: ${hours}:${String(minutes || 0).padStart(2, '0')} (${timezone})`);
+    const [targetHours, targetMinutes] = timeToUse!.split(':').map(Number);
+    const preferredDayNumbers = preferredDays
+      .map(d => dayMap[d.toLowerCase()])
+      .filter(n => n !== undefined);
     
-    let candidateSlots = sortedSlots;
+    console.log(`🕐 Looking for: ${preferredDays.join(', ')} at ${targetHours}:${String(targetMinutes || 0).padStart(2, '0')} (${timezone})`);
     
-    // Filtrar por día si se especificó
-    if (preferredDays && preferredDays.length > 0) {
-      const preferredDayNumbers = preferredDays
-        .map(d => dayMap[d.toLowerCase()])
-        .filter(n => n !== undefined);
-      
-      candidateSlots = sortedSlots.filter(slot => {
-        const slotDay = slot.getDay();
-        return preferredDayNumbers.includes(slotDay);
-      });
-      
-      if (candidateSlots.length === 0) {
-        console.log(`⚠️ No slots on preferred day, searching all days`);
-        candidateSlots = sortedSlots;
-      }
+    // PASO 1: Filtrar slots del día preferido
+    const preferredDaySlots = sortedSlots.filter(slot => {
+      const slotDay = getSlotDay(slot);
+      return preferredDayNumbers.includes(slotDay);
+    });
+    
+    if (preferredDaySlots.length === 0) {
+      // Si no hay slots en el día preferido, buscar al día siguiente (primer slot disponible)
+      console.log(`⚠️ No slots on preferred day, looking for next day`);
+      console.log(`✅ Using first available slot (next day):`);
+      const firstSlot = sortedSlots[0];
+      console.log(`   ${firstSlot.toLocaleString('es-MX', { 
+        timeZone: timezone,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`);
+      return firstSlot;
     }
     
-    // Buscar slot en o después de la hora preferida
-    const timeMatch = candidateSlots.find(slot => {
-      const slotHour = parseInt(slot.toLocaleString('en-US', { 
+    // PASO 2: Buscar hora exacta en el día preferido
+    const exactTimeMatch = preferredDaySlots.find(slot => {
+      const { hour, minute } = getSlotTime(slot);
+      return hour === targetHours && minute === (targetMinutes || 0);
+    });
+    
+    if (exactTimeMatch) {
+      console.log(`✅ Found exact time match:`);
+      console.log(`   ${exactTimeMatch.toLocaleString('es-MX', { 
         timeZone: timezone,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
         hour: '2-digit',
-        hour12: false
-      }));
-      const slotMinute = parseInt(slot.toLocaleString('en-US', { 
-        timeZone: timezone,
         minute: '2-digit'
-      }));
+      })}`);
+      return exactTimeMatch;
+    }
+    
+    // PASO 3: Buscar +30min, luego +1h, etc. en el mismo día
+    console.log(`⚠️ Exact time not available, looking for alternatives (+30min, +1h, etc.)`);
+    
+    // Buscar slots después de la hora preferida en el mismo día
+    const afterTimeSlots = preferredDaySlots.filter(slot => {
+      const { hour, minute } = getSlotTime(slot);
+      if (hour > targetHours) return true;
+      if (hour === targetHours && minute >= (targetMinutes || 0)) return true;
+      return false;
+    });
+    
+    if (afterTimeSlots.length > 0) {
+      // Ordenar por hora y tomar el más cercano
+      afterTimeSlots.sort((a, b) => {
+        const timeA = getSlotTime(a);
+        const timeB = getSlotTime(b);
+        if (timeA.hour !== timeB.hour) return timeA.hour - timeB.hour;
+        return timeA.minute - timeB.minute;
+      });
       
-      if (slotHour > hours) return true;
-      if (slotHour === hours && slotMinute >= (minutes || 0)) return true;
+      const closestSlot = afterTimeSlots[0];
+      console.log(`✅ Found closest slot after preferred time:`);
+      console.log(`   ${closestSlot.toLocaleString('es-MX', { 
+        timeZone: timezone,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`);
+      return closestSlot;
+    }
+    
+    // PASO 4: Si no encuentra nada en el día preferido, buscar al día siguiente
+    console.log(`⚠️ No slots after preferred time on preferred day, looking for next day`);
+    
+    // Buscar el siguiente día disponible (primer slot cronológicamente después del último slot del día preferido)
+    // Si hay slots en el día preferido, buscar después del último; si no, buscar cualquier slot después
+    let nextDaySlot: Date | undefined;
+    
+    if (preferredDaySlots.length > 0) {
+      // Si hay slots en el día preferido, buscar el primer slot DESPUÉS del último slot del día preferido
+      const lastPreferredSlot = preferredDaySlots[preferredDaySlots.length - 1];
+      nextDaySlot = sortedSlots.find(slot => 
+        slot.getTime() > lastPreferredSlot.getTime() && 
+        !preferredDaySlots.includes(slot)
+      );
+    } else {
+      // Si no hay slots en el día preferido, buscar el primer slot disponible
+      nextDaySlot = sortedSlots[0];
+    }
+    
+    if (nextDaySlot) {
+      console.log(`✅ Found slot on next day:`);
+      console.log(`   ${nextDaySlot.toLocaleString('es-MX', { 
+        timeZone: timezone,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`);
+      return nextDaySlot;
+    }
+    
+    // Si aún no encuentra, usar el primer slot del día preferido (aunque sea antes de la hora)
+    // Esto es mejor que no agendar nada
+    if (preferredDaySlots.length > 0) {
+      console.log(`⚠️ Using first available slot on preferred day (before preferred time):`);
+      const firstSlot = preferredDaySlots[0];
+      console.log(`   ${firstSlot.toLocaleString('es-MX', { 
+        timeZone: timezone,
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })}`);
+      return firstSlot;
+    }
+    
+    // Fallback final
+    console.log(`⚠️ No slots found on preferred day, using first available`);
+    return sortedSlots[0];
+  }
+
+  // CASO 4: Solo hora preferida (sin día específico)
+  if (convertedTime || preferredTime) {
+    const timeToUse = convertedTime || preferredTime;
+    const [targetHours, targetMinutes] = timeToUse!.split(':').map(Number);
+    console.log(`🕐 Looking for time: ${targetHours}:${String(targetMinutes || 0).padStart(2, '0')} (${timezone})`);
+    
+    // Buscar slot en o después de la hora preferida
+    const timeMatch = sortedSlots.find(slot => {
+      const { hour, minute } = getSlotTime(slot);
+      if (hour > targetHours) return true;
+      if (hour === targetHours && minute >= (targetMinutes || 0)) return true;
       return false;
     });
     
@@ -582,7 +738,7 @@ export function findNextAvailableSlot(
       return timeMatch;
     } else {
       console.log(`⚠️ No slots at/after preferred time, using first available`);
-      return candidateSlots[0] || sortedSlots[0];
+      return sortedSlots[0];
     }
   }
 
