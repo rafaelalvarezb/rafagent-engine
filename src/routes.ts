@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
+import jwt from 'jsonwebtoken';
 import { storage } from "./storage";
 import { insertProspectSchema, insertTemplateSchema, insertUserConfigSchema, insertActivityLogSchema, insertSequenceSchema } from "@shared/schema";
 import { sendEmail, getThreadMessages, getMessageBody } from "./services/gmail";
@@ -14,6 +15,18 @@ import { SERVER_CONFIG } from "./config";
 import { redirectToEngine } from "./utils/engineRedirect";
 import { ensureCurrentUserDefaults } from "./utils/ensureDefaults";
 import { detectUserTimezone } from "./utils/timezoneDetection";
+
+/**
+ * Generate JWT token for user
+ */
+function generateToken(userId: string, userEmail: string): string {
+  const JWT_SECRET = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'dev-secret-change-in-production';
+  return jwt.sign(
+    { userId, userEmail },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+}
 
 /**
  * Get template name for touchpoint number
@@ -130,8 +143,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Redirect to frontend
-      res.redirect('/');
+      // Generate JWT token for frontend
+      const token = generateToken(user.id, user.email);
+      
+      // Redirect to frontend with token
+      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      res.redirect(`${frontendUrl}/dashboard?token=${token}`);
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
@@ -139,15 +156,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/auth/status", async (req, res) => {
-    if (!req.session.userId) {
+    // Check for JWT token first (from URL parameter)
+    const authHeader = req.headers.authorization;
+    let token: string | undefined;
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    }
+    
+    // If no JWT token, check session
+    if (!token && !req.session.userId) {
       return res.json({ authenticated: false });
     }
 
     try {
-      const user = await storage.getUser(req.session.userId);
+      let user;
+      
+      // If JWT token provided, verify it
+      if (token) {
+        const JWT_SECRET = process.env.JWT_SECRET || process.env.SESSION_SECRET || 'dev-secret-change-in-production';
+        try {
+          const payload = jwt.verify(token, JWT_SECRET) as { userId: string; userEmail: string };
+          user = await storage.getUser(payload.userId);
+          if (!user) {
+            return res.json({ authenticated: false });
+          }
+        } catch (error) {
+          // Invalid token, try session
+          if (!req.session.userId) {
+            return res.json({ authenticated: false });
+          }
+        }
+      }
+      
+      // Fallback to session if no JWT or JWT failed
       if (!user) {
-        req.session.destroy(() => {});
-        return res.json({ authenticated: false });
+        if (!req.session.userId) {
+          return res.json({ authenticated: false });
+        }
+        user = await storage.getUser(req.session.userId);
+        if (!user) {
+          req.session.destroy(() => {});
+          return res.json({ authenticated: false });
+        }
       }
 
       // Ensure user has default sequences and config
