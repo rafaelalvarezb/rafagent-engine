@@ -25,6 +25,9 @@ interface ProcessResult {
   responsesAnalyzed: number;
   meetingsScheduled: number;
   errors: string[];
+  outsideWorkingHours?: boolean;
+  noNewResponses?: boolean;
+  message?: string;
 }
 
 /**
@@ -62,6 +65,8 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
 
     if (!isWithinWorkingHours(workingHours)) {
       console.log('Skipping agent run - outside working hours');
+      result.outsideWorkingHours = true;
+      result.message = 'Agent execution is outside your configured working hours. Modify your working hours in Configuration to execute the agent now.';
       return result;
     }
 
@@ -71,6 +76,10 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
 
     const daysBetweenFollowups = config.daysBetweenFollowups || 4;
     const numberOfTouchpoints = config.numberOfTouchpoints || 4;
+    
+    // Track if we checked for responses and found none
+    let checkedForResponses = false;
+    let foundNewResponses = false;
 
     for (const prospect of prospects) {
       result.processed++;
@@ -109,9 +118,11 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
 
         // Case 3: Check for new responses to analyze (check even if sequence finished or not interested)
         if (prospect.threadId && !prospect.status?.includes('Meeting Scheduled')) {
+          checkedForResponses = true;
           const hasNewResponse = await checkForNewResponse(user, prospect);
           
           if (hasNewResponse) {
+            foundNewResponses = true;
             const wasInterested = await analyzeProspectResponse(user, prospect);
             result.responsesAnalyzed++;
             
@@ -148,6 +159,12 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
         console.error(`Error processing prospect ${prospect.id}:`, error);
         result.errors.push(`${prospect.contactEmail}: ${error.message}`);
       }
+    }
+
+    // Check if no new responses were detected
+    if (checkedForResponses && !foundNewResponses && result.emailsSent === 0 && result.responsesAnalyzed === 0 && result.meetingsScheduled === 0) {
+      result.noNewResponses = true;
+      result.message = 'No new responses detected for these prospects in your email inbox. Please wait a few seconds and try again.';
     }
 
     // Log activity

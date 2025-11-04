@@ -7,7 +7,6 @@ import { classifyResponse, replaceTemplateVariables } from "./services/ai";
 import { getAvailableSlots, findNextAvailableSlot, scheduleMeeting } from "./services/calendar";
 import { getAuthUrl, getTokensFromCode, getUserInfo } from "./auth";
 import { requireAuth, getCurrentUserId } from "./middleware/auth";
-import { generateToken, verifyToken } from "./middleware/jwt";
 import { runAgent } from "./automation/agent";
 import { createDefaultTemplates, createDefaultUserConfig } from "./automation/defaultTemplates";
 import { isWithinWorkingHours, getWorkingHoursFromConfig, debugWorkingHours } from "./utils/workingHours";
@@ -28,17 +27,24 @@ function getTemplateNameForTouchpoint(touchpointNumber: number): string {
 export async function registerRoutes(app: Express): Promise<Server> {
   
   // ===== ROOT ROUTE =====
-  // Redirect root requests to frontend
+  // Redirect root requests to frontend (if in production)
   app.get("/", (_req, res) => {
-    const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
-    res.redirect(frontendUrl);
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    if (process.env.NODE_ENV === 'production') {
+      res.redirect(frontendUrl);
+    } else {
+      res.json({
+        message: "RafAgent Backend API",
+        status: "running",
+        version: "1.0.0"
+      });
+    }
   });
 
   // Health check endpoint
   app.get("/health", (_req, res) => {
     res.json({
       status: "ok",
-      service: "rafagent-engine",
       timestamp: new Date().toISOString(),
       websocket: "enabled"
     });
@@ -124,13 +130,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Generate JWT token for frontend
-      const token = generateToken(user.id, user.email);
-        
-      // Redirect to frontend with token as query parameter
-      const frontendUrl = process.env.FRONTEND_URL || 'https://rafagent-saas.vercel.app';
-      console.log(`✅ Authentication successful for ${user.email}, redirecting to ${frontendUrl}/dashboard?token=${token}`);
-      res.redirect(`${frontendUrl}/dashboard?token=${token}`);
+      // Redirect to frontend
+      res.redirect('/');
     } catch (error: any) {
       console.error('OAuth callback error:', error);
       res.status(500).send(`Authentication failed: ${error.message}`);
@@ -138,33 +139,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get("/api/auth/status", async (req, res) => {
-    try {
-      let userId: string | undefined;
-      
-      // Check for JWT token first (for frontend)
-      const authHeader = req.headers.authorization;
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        const token = authHeader.substring(7);
-        const payload = verifyToken(token);
-        if (payload) {
-          userId = payload.userId;
-        }
-      }
-      
-      // Fallback to session (for backward compatibility)
-      if (!userId && req.session.userId) {
-        userId = req.session.userId;
-      }
-      
-      if (!userId) {
+    if (!req.session.userId) {
       return res.json({ authenticated: false });
     }
 
-      const user = await storage.getUser(userId);
+    try {
+      const user = await storage.getUser(req.session.userId);
       if (!user) {
-        if (req.session) {
         req.session.destroy(() => {});
-        }
         return res.json({ authenticated: false });
       }
 
@@ -181,7 +163,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       });
     } catch (error) {
-      console.error('Auth status error:', error);
       res.json({ authenticated: false });
     }
   });
@@ -368,6 +349,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
             req.body.status = 'waiting_working_hours';
           }
         }
+      }
+      
+      // If editing prospect fields (not just sendSequence toggle), validate that no emails have been sent
+      const isEditingProspectFields = req.body.contactName !== undefined || 
+                                     req.body.contactEmail !== undefined || 
+                                     req.body.contactTitle !== undefined || 
+                                     req.body.companyName !== undefined || 
+                                     req.body.industry !== undefined;
+      
+      if (isEditingProspectFields) {
+        // Only allow editing if no touchpoints have been sent
+        if (existing.touchpointsSent && existing.touchpointsSent > 0) {
+          return res.status(400).json({ 
+            error: "Cannot edit prospect: Email has already been sent. You can only edit prospects before the first email is sent." 
+          });
+        }
+        
+        // Filter to only allow editing these specific fields
+        const editableFields = {
+          contactName: req.body.contactName,
+          contactEmail: req.body.contactEmail,
+          contactTitle: req.body.contactTitle,
+          companyName: req.body.companyName,
+          industry: req.body.industry,
+        };
+        
+        // Remove undefined fields
+        Object.keys(editableFields).forEach(key => {
+          if (editableFields[key as keyof typeof editableFields] === undefined) {
+            delete editableFields[key as keyof typeof editableFields];
+          }
+        });
+        
+        // Validate required fields
+        if (editableFields.contactName !== undefined && !editableFields.contactName.trim()) {
+          return res.status(400).json({ error: "Contact name is required" });
+        }
+        if (editableFields.contactEmail !== undefined && !editableFields.contactEmail.trim()) {
+          return res.status(400).json({ error: "Contact email is required" });
+        }
+        
+        // Merge editable fields with any other allowed updates (like sendSequence changes)
+        req.body = {
+          ...editableFields,
+          ...(req.body.sendSequence !== undefined && { sendSequence: req.body.sendSequence }),
+          ...(req.body.status && { status: req.body.status }),
+        };
       }
       
       // Convert lastContactDate string to Date object if provided
@@ -1106,39 +1134,92 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ===== ENGINE STATUS ENDPOINTS =====
-  app.get("/api/engine/status", async (req, res) => {
+  app.get("/api/engine/status", requireAuth, async (req, res) => {
     try {
-      if (SERVER_CONFIG.IS_HYBRID_MODE) {
-        const response = await redirectToEngine('/api/status');
-        const result = await response.json();
-        return res.json(result);
+      // Get current user to check if admin
+      const userId = getCurrentUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
       }
       
-      // Fallback for development mode
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+
+      // Only admin can see engine status (admin email: rafaelalvrzb@gmail.com)
+      const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'rafaelalvrzb@gmail.com';
+      if (user.email !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: 'Forbidden: Admin access required' });
+      }
+
+      // Get engine status with real data
+      const uptimeSeconds = Math.floor(process.uptime());
+      const allUsers = await storage.getAllUsers();
+      const totalUsers = allUsers.length;
+      
+      // Count active users (users with prospects created in last 30 days)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const activeUserIds = new Set<string>();
+      for (const user of allUsers) {
+        try {
+          const prospects = await storage.getProspectsByUser(user.id);
+          const hasRecentActivity = prospects.some(prospect => {
+            const createdAt = new Date(prospect.createdAt);
+            return createdAt >= thirtyDaysAgo;
+          });
+          if (hasRecentActivity) {
+            activeUserIds.add(user.id);
+          }
+        } catch (err) {
+          // If error, skip this user
+          console.error(`Error getting prospects for user ${user.id}:`, err);
+      }
+      }
+      
+      const activeUsers = activeUserIds.size || totalUsers; // Fallback to total if no recent activity
+
       res.json({
-        status: 'development',
-        message: 'Running in development mode - engine not available'
+        status: 'running',
+        activeUsers: activeUsers,
+        totalUsers: totalUsers,
+        uptime: uptimeSeconds,
+        timestamp: new Date().toISOString()
       });
     } catch (error: any) {
+      console.error('Error getting engine status:', error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.get("/api/engine/health", async (req, res) => {
+  app.get("/api/engine/health", requireAuth, async (req, res) => {
     try {
-      if (SERVER_CONFIG.IS_HYBRID_MODE) {
-        const response = await redirectToEngine('/health');
-        const result = await response.json();
-        return res.json(result);
+      // Get current user to check if admin
+      const userId = getCurrentUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
       }
       
-      // Fallback for development mode
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+      
+      // Only admin can see engine health
+      const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'rafaelalvrzb@gmail.com';
+      if (user.email !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: 'Forbidden: Admin access required' });
+      }
+
       res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        service: 'rafagent-frontend-dev'
+        service: 'rafagent-engine'
       });
     } catch (error: any) {
+      console.error('Error getting engine health:', error);
       res.status(500).json({ error: error.message });
     }
   });
