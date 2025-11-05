@@ -195,9 +195,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.json({ authenticated: false });
         }
         user = await storage.getUser(req.session.userId);
-        if (!user) {
-          req.session.destroy(() => {});
-          return res.json({ authenticated: false });
+      if (!user) {
+        req.session.destroy(() => {});
+        return res.json({ authenticated: false });
         }
       }
 
@@ -334,7 +334,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   user.id,
                   undefined,
                   undefined,
-                  prospect.id // Add prospectId for pixel tracking
+                  prospect.id, // Add prospectId for pixel tracking
+                  user.name || '' // Sender name for "From" header
                 );
 
                 await storage.updateProspect(prospect.id, {
@@ -688,6 +689,82 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
 
+  // ===== NOTIFICATIONS =====
+  app.get("/api/notifications", requireAuth, async (req, res) => {
+    try {
+      const userId = getCurrentUserId(req)!;
+      
+      // Get all prospects with recent activity (last 30 days)
+      const prospects = await storage.getProspectsByUser(userId);
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const notifications: Array<{
+        id: string;
+        type: 'email_opened' | 'replied' | 'meeting_scheduled';
+        prospectName: string;
+        prospectEmail: string;
+        companyName: string | null;
+        contactTitle: string | null;
+        timestamp: Date;
+        meetingTime?: Date;
+        read: boolean;
+      }> = [];
+      
+      for (const prospect of prospects) {
+        // Email opened notification
+        if (prospect.emailOpened && prospect.emailOpenedAt && prospect.emailOpenedAt >= thirtyDaysAgo) {
+          notifications.push({
+            id: `email_opened_${prospect.id}`,
+            type: 'email_opened',
+            prospectName: prospect.contactName,
+            prospectEmail: prospect.contactEmail,
+            companyName: prospect.companyName,
+            contactTitle: prospect.contactTitle,
+            timestamp: prospect.emailOpenedAt,
+            read: false
+          });
+        }
+        
+        // Replied notification
+        if (prospect.repliedAt && prospect.repliedAt >= thirtyDaysAgo) {
+          notifications.push({
+            id: `replied_${prospect.id}`,
+            type: 'replied',
+            prospectName: prospect.contactName,
+            prospectEmail: prospect.contactEmail,
+            companyName: prospect.companyName,
+            contactTitle: prospect.contactTitle,
+            timestamp: prospect.repliedAt,
+            read: false
+          });
+        }
+        
+        // Meeting scheduled notification
+        if (prospect.meetingTime && prospect.meetingTime >= thirtyDaysAgo) {
+          notifications.push({
+            id: `meeting_${prospect.id}`,
+            type: 'meeting_scheduled',
+            prospectName: prospect.contactName,
+            prospectEmail: prospect.contactEmail,
+            companyName: prospect.companyName,
+            contactTitle: prospect.contactTitle,
+            timestamp: prospect.updatedAt || prospect.createdAt,
+            meetingTime: prospect.meetingTime,
+            read: false
+          });
+        }
+      }
+      
+      // Sort by timestamp (most recent first)
+      notifications.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+      
+      res.json(notifications);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   // ===== ACTIVITY LOGS =====
   app.get("/api/activities", requireAuth, async (req, res) => {
     try {
@@ -774,7 +851,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         subject,
         htmlBody,
         undefined,
-        user.googleRefreshToken || undefined
+        user.googleRefreshToken || undefined,
+        user.id,
+        undefined,
+        undefined,
+        prospect.id, // prospectId for pixel tracking
+        user.name || '' // Sender name for "From" header
       );
 
       const threadLink = `https://mail.google.com/mail/u/0/#thread/${result.threadId}`;
@@ -869,7 +951,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         htmlBody,
         prospect.threadId,
         user.googleRefreshToken,
-        userId
+        userId,
+        undefined,
+        undefined,
+        prospect.id, // prospectId for pixel tracking
+        user.name || '' // Sender name for "From" header
       );
 
       await storage.updateProspect(prospect.id, {
@@ -1180,6 +1266,74 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const result = await runAgent(userId);
       res.json(result);
     } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ===== ADMIN ENDPOINTS =====
+  // Get all users (admin only)
+  app.get("/api/admin/users", requireAuth, async (req, res) => {
+    try {
+      // Get current user to check if admin
+      const userId = getCurrentUserId(req);
+      if (!userId) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: 'User not found' });
+      }
+
+      // Only admin can see all users
+      const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'rafaelalvrzb@gmail.com';
+      if (user.email !== ADMIN_EMAIL) {
+        return res.status(403).json({ error: 'Forbidden: Admin access required' });
+      }
+
+      // Get all users
+      const allUsers = await storage.getAllUsers();
+      
+      // Get activity data for each user (last 30 days)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      
+      const usersWithActivity = await Promise.all(allUsers.map(async (u) => {
+        try {
+          const prospects = await storage.getProspectsByUser(u.id);
+          const recentProspects = prospects.filter(p => {
+            const createdAt = new Date(p.createdAt);
+            return createdAt >= thirtyDaysAgo;
+          });
+          
+          return {
+            id: u.id,
+            email: u.email,
+            name: u.name,
+            timezone: u.timezone,
+            createdAt: u.createdAt,
+            totalProspects: prospects.length,
+            recentProspects: recentProspects.length,
+            isActive: recentProspects.length > 0
+          };
+        } catch (error) {
+          console.error(`Error getting prospects for user ${u.id}:`, error);
+          return {
+            id: u.id,
+            email: u.email,
+            name: u.name,
+            timezone: u.timezone,
+            createdAt: u.createdAt,
+            totalProspects: 0,
+            recentProspects: 0,
+            isActive: false
+          };
+        }
+      }));
+      
+      res.json(usersWithActivity);
+    } catch (error: any) {
+      console.error('Error getting users:', error);
       res.status(500).json({ error: error.message });
     }
   });

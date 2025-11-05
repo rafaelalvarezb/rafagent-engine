@@ -34,7 +34,8 @@ export async function sendEmail(
   userId?: string,
   inReplyTo?: string,
   references?: string,
-  prospectId?: string // For pixel tracking
+  prospectId?: string, // For pixel tracking
+  senderName?: string // Sender's display name for "From" header
 ): Promise<{ threadId: string; messageId: string }> {
   const gmail = await getGmailClient(accessToken, refreshToken, userId);
   
@@ -100,9 +101,26 @@ export async function sendEmail(
     ? `=?UTF-8?B?${Buffer.from(subject, 'utf-8').toString('base64')}?=`
     : subject;
 
+  // Get sender email from Gmail profile (using the access token)
+  let senderEmail = '';
+  try {
+    const gmail = await getGmailClient(accessToken, refreshToken, userId);
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    senderEmail = profile.data.emailAddress || '';
+  } catch (error) {
+    console.error('Error getting sender email:', error);
+  }
+
+  // Build From header with sender name if provided
+  // Format: "Sender Name" <email@domain.com>
+  const fromHeader = senderName && senderEmail
+    ? `"${senderName}" <${senderEmail}>`
+    : senderEmail || 'me';
+
   const headers = [
     'Content-Type: text/html; charset=utf-8',
     'MIME-Version: 1.0',
+    `From: ${fromHeader}`,
     `To: ${to}`,
     `Subject: ${encodedSubject}`
   ];

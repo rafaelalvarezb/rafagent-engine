@@ -124,7 +124,9 @@ async function sendReminderEmail(
       user.googleRefreshToken,
       user.id,
       prospect.lastMessageId,
-      prospect.lastMessageId
+      prospect.lastMessageId,
+      prospect.id, // prospectId for pixel tracking
+      user.name || '' // Sender name for "From" header
     );
 
     console.log(`✅ Reminder sent to ${prospect.contactEmail}`);

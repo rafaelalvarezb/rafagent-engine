@@ -268,7 +268,8 @@ async function sendInitialEmail(user: any, prospect: any) {
     user.id,
     undefined,
     undefined,
-    prospect.id // Add prospectId for pixel tracking
+    prospect.id, // Add prospectId for pixel tracking
+    user.name || '' // Sender name for "From" header
   );
 
   const threadLink = `https://mail.google.com/mail/u/0/#thread/${result.threadId}`;
@@ -380,7 +381,8 @@ async function sendFollowUpEmail(user: any, prospect: any, config: any) {
     user.id,
     prospect.lastMessageId, // In-Reply-To header
     prospect.lastMessageId,  // References header
-    prospect.id // Add prospectId for pixel tracking
+    prospect.id, // Add prospectId for pixel tracking
+    user.name || '' // Sender name for "From" header
   );
 
   // Wait a moment before final state
