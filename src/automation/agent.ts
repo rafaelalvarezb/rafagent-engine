@@ -119,14 +119,31 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
         // Case 3: Check for new responses to analyze (check even if sequence finished or not interested)
         if (prospect.threadId && !prospect.status?.includes('Meeting Scheduled')) {
           checkedForResponses = true;
-          const hasNewResponse = await checkForNewResponse(user, prospect);
+          const responseCheck = await checkForNewResponse(user, prospect);
           
-          if (hasNewResponse) {
+          // If user replied manually, stop the sequence
+          if (responseCheck.isManualReply) {
+            console.log(`   🛑 Manual reply detected - stopping sequence for ${prospect.contactEmail}`);
+            await storage.updateProspect(prospect.id, {
+              status: '🛑 Sequence Ended - Manual Reply',
+              sendSequence: false
+            });
+            emitProspectStatusChange(userId, prospect.id, '🛑 Sequence Ended - Manual Reply');
+            await storage.createActivityLog({
+              userId: user.id,
+              prospectId: prospect.id,
+              action: 'Sequence Stopped (Manual Reply)',
+              detail: 'Sequence stopped because user replied manually to this prospect'
+            });
+            continue;
+          }
+          
+          if (responseCheck.hasNewResponse) {
             foundNewResponses = true;
             const wasInterested = await analyzeProspectResponse(user, prospect);
             result.responsesAnalyzed++;
             
-            // If interested, schedule meeting immediately
+            // If interested, schedule meeting immediately and stop sequences for same company
             if (wasInterested) {
               // Refresh prospect data from database to get updated suggestedDays/suggestedTime
               const updatedProspect = await storage.getProspect(prospect.id);
@@ -138,6 +155,11 @@ export async function runAgent(userId: string): Promise<ProcessResult> {
                 
                 await scheduleProspectMeeting(user, updatedProspect, config, sequence);
                 result.meetingsScheduled++;
+                
+                // Stop sequences for other prospects from the same company
+                if (updatedProspect.companyName) {
+                  await stopSequencesForSameCompany(user.id, updatedProspect.companyName, updatedProspect.id);
+                }
               }
             }
             // Skip marking as "Sequence Finished" if we processed a response
@@ -410,8 +432,9 @@ async function sendFollowUpEmail(user: any, prospect: any, config: any) {
 
 /**
  * Check if there's a new response in the thread
+ * Returns: { hasNewResponse: boolean, isManualReply: boolean }
  */
-async function checkForNewResponse(user: any, prospect: any): Promise<boolean> {
+async function checkForNewResponse(user: any, prospect: any): Promise<{ hasNewResponse: boolean; isManualReply: boolean }> {
   try {
     const messages = await getThreadMessages(
       user.googleAccessToken,
@@ -420,7 +443,7 @@ async function checkForNewResponse(user: any, prospect: any): Promise<boolean> {
       user.id
     );
 
-    if (messages.length === 0) return false;
+    if (messages.length === 0) return { hasNewResponse: false, isManualReply: false };
 
     // Get the last message
     const lastMessage = messages[messages.length - 1];
@@ -428,12 +451,21 @@ async function checkForNewResponse(user: any, prospect: any): Promise<boolean> {
       h.name.toLowerCase() === 'from'
     )?.value || '';
 
+    // Check if last message is from the user (manual reply)
+    const userEmail = user.email?.toLowerCase() || '';
+    const isFromUser = from.toLowerCase().includes(userEmail);
+    
+    if (isFromUser) {
+      console.log(`Last message is from user (manual reply): ${from}`);
+      return { hasNewResponse: true, isManualReply: true };
+    }
+
     // Check if last message is from prospect (not from us)
     const isFromProspect = from.toLowerCase().includes(prospect.contactEmail.toLowerCase());
     
     if (!isFromProspect) {
       console.log(`Last message is not from prospect ${prospect.contactEmail}, it's from: ${from}`);
-      return false;
+      return { hasNewResponse: false, isManualReply: false };
     }
 
     // Check if we've already processed this response by looking at the prospect status
@@ -444,15 +476,15 @@ async function checkForNewResponse(user: any, prospect: any): Promise<boolean> {
     
     if (alreadyProcessedStatuses.some(s => currentStatus?.includes(s))) {
       console.log(`Response already processed for prospect ${prospect.contactEmail}, current status: ${currentStatus}`);
-      return false;
+      return { hasNewResponse: false, isManualReply: false };
     }
 
     console.log(`Found new response from prospect ${prospect.contactEmail}`);
-    return true;
+    return { hasNewResponse: true, isManualReply: false };
 
   } catch (error) {
     console.error('Error checking for new response:', error);
-    return false;
+    return { hasNewResponse: false, isManualReply: false };
   }
 }
 
@@ -720,6 +752,51 @@ async function scheduleProspectMeeting(user: any, prospect: any, config: any, se
     await storage.updateProspect(prospect.id, {
       status: `❌ Scheduling Error: ${error.message}`
     });
+  }
+}
+
+/**
+ * Stop sequences for other prospects from the same company
+ * Called when a prospect from a company responds with interest
+ */
+async function stopSequencesForSameCompany(userId: string, companyName: string, excludeProspectId: string) {
+  try {
+    console.log(`\n🏢 Stopping sequences for other prospects from company: ${companyName}`);
+    
+    // Get all prospects from the same user and company (excluding the one that responded)
+    const allProspects = await storage.getProspectsByUser(userId);
+    const sameCompanyProspects = allProspects.filter(p => 
+      p.companyName && 
+      p.companyName.toLowerCase() === companyName.toLowerCase() &&
+      p.id !== excludeProspectId &&
+      p.sendSequence === true // Only stop active sequences
+    );
+    
+    console.log(`   Found ${sameCompanyProspects.length} other prospects from ${companyName} with active sequences`);
+    
+    // Stop sequences for each prospect
+    for (const prospect of sameCompanyProspects) {
+      await storage.updateProspect(prospect.id, {
+        status: '🏢 Sequence Ended - Company Contacted',
+        sendSequence: false
+      });
+      
+      emitProspectStatusChange(userId, prospect.id, '🏢 Sequence Ended - Company Contacted');
+      
+      await storage.createActivityLog({
+        userId,
+        prospectId: prospect.id,
+        action: 'Sequence Stopped (Company Contacted)',
+        detail: `Sequence stopped because another prospect from ${companyName} responded with interest`
+      });
+      
+      console.log(`   ✅ Stopped sequence for ${prospect.contactName} (${prospect.contactEmail})`);
+    }
+    
+    console.log(`✅ Stopped sequences for ${sameCompanyProspects.length} prospects from ${companyName}\n`);
+    
+  } catch (error) {
+    console.error('Error stopping sequences for same company:', error);
   }
 }
 
