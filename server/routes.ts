@@ -1785,6 +1785,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // ===== ADMIN: Apply Mailboxes Migration =====
+  // Temporary endpoint to apply mailboxes migration
+  app.post("/api/admin/migrate-mailboxes", requireAuth, async (req, res) => {
+    try {
+      const userId = getCurrentUserId(req)!;
+      const user = await storage.getUser(userId);
+      
+      // Only allow admin users (you can customize this check)
+      if (!user || user.email !== 'rafaelalvrzb@gmail.com') {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const fs = await import('fs');
+      const path = await import('path');
+      const migrationPath = path.resolve(import.meta.dirname, '..', 'migrations', '0009_add_mailboxes.sql');
+      
+      if (!fs.existsSync(migrationPath)) {
+        return res.status(404).json({ error: "Migration file not found" });
+      }
+
+      const migrationSQL = fs.readFileSync(migrationPath, 'utf-8');
+      const { pool } = await import('../db');
+      
+      await pool.query(migrationSQL);
+      
+      res.json({ success: true, message: "Mailboxes migration applied successfully" });
+    } catch (error: any) {
+      console.error('Error applying migration:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   const httpServer = createServer(app);
   return httpServer;
 }
