@@ -1,11 +1,12 @@
 {
   "name": "rafagent-engine",
   "version": "1.0.0",
+  "description": "RafAgent Persistent Automation Engine - Handles email sequences, AI analysis, and meeting scheduling",
   "type": "module",
-  "main": "src/index.js",
+  "main": "server/index.js",
   "scripts": {
     "dev": "NODE_ENV=development tsx server/index.ts",
-    "build": "vite build",
+    "build": "echo 'Skipping TypeScript build for now'",
     "start": "NODE_ENV=production tsx server/index.ts",
     "check": "tsc",
     "db:push": "drizzle-kit push"
@@ -28,7 +29,6 @@
     "passport": "^0.7.0",
     "passport-local": "^1.0.0",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1",
     "tsx": "^4.20.5",
     "ws": "^8.18.0",
     "zod": "^3.24.2",
@@ -38,8 +38,6 @@
     "@types/express": "4.17.21",
     "@types/node": "20.16.11",
     "@types/node-cron": "^3.0.11",
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.1",
     "@types/ws": "^8.5.13",
     "drizzle-kit": "^0.31.4",
     "tsx": "^4.20.5",
@@ -49,3 +47,4 @@
     "node": ">=18.0.0"
   }
 }
+
