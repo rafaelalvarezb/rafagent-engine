@@ -17,6 +17,7 @@ function log(message: string, source = "express") {
 }
 
 const app = express();
+app.set("trust proxy", 1); // Trust first proxy (Vercel/Railway)
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -76,7 +77,7 @@ app.use((req, res, next) => {
     // For Railway (backend only), skip static file serving
     try {
       const { serveStatic } = await import("./vite");
-      serveStatic(app);
+    serveStatic(app);
     } catch (error: any) {
       // If static files don't exist or vite can't be imported (Railway backend only), that's OK
       if (error.code === 'ERR_MODULE_NOT_FOUND') {
