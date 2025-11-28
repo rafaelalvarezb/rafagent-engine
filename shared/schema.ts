@@ -54,6 +54,7 @@ export const prospects = pgTable("prospects", {
   threadId: text("thread_id"),
   threadLink: text("thread_link"),
   lastMessageId: text("last_message_id"), // Gmail Message-ID for email threading
+  mailboxId: varchar("mailbox_id").references(() => mailboxes.id, { onDelete: 'set null' }), // Which mailbox owns this conversation
   suggestedDays: text("suggested_days"),
   suggestedTime: text("suggested_time"),
   suggestedTimezone: text("suggested_timezone"),
