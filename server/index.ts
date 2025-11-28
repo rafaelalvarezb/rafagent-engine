@@ -1,10 +1,20 @@
 import "dotenv/config";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
 import { sessionMiddleware } from "./middleware/session";
 import { startAgentScheduler } from "./automation/scheduler";
 import { initializeWebSocket } from "./services/websocket";
+
+// Simple log function for production (vite.ts is only needed in development)
+function log(message: string, source = "express") {
+  const formattedTime = new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+  console.log(`${formattedTime} [${source}] ${message}`);
+}
 
 const app = express();
 app.use(express.json());
@@ -58,15 +68,22 @@ app.use((req, res, next) => {
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (app.get("env") === "development") {
+    // Dynamically import vite only in development
+    const { setupVite } = await import("./vite");
     await setupVite(app, server);
   } else {
     // In production, only serve static files if they exist (for Vercel)
     // For Railway (backend only), skip static file serving
     try {
+      const { serveStatic } = await import("./vite");
       serveStatic(app);
-    } catch (error) {
-      // If static files don't exist (Railway backend only), that's OK
-      log("⚠️  Static files not found - running as API-only backend");
+    } catch (error: any) {
+      // If static files don't exist or vite can't be imported (Railway backend only), that's OK
+      if (error.code === 'ERR_MODULE_NOT_FOUND') {
+        log("⚠️  Vite not available - running as API-only backend");
+      } else {
+        log("⚠️  Static files not found - running as API-only backend");
+      }
     }
   }
 
