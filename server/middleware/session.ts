@@ -17,8 +17,10 @@ export const sessionMiddleware = session({
   cookie: {
     secure: process.env.NODE_ENV === 'production', // require https in production
     httpOnly: true,
+    sameSite: 'lax', // Allow cookies to be sent in cross-site requests
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  }
+  },
+  name: 'connect.sid' // Standard session cookie name
 });
 
 // Extend Express Request type to include session data
